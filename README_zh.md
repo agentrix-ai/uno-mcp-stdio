@@ -144,7 +144,7 @@ rm ~/.uno-mcp/credentials.json
 
 ```bash
 # 克隆项目
-git clone https://github.com/xray918/uno-mcp-stdio.git
+git clone https://github.com/agentrix-ai/uno-mcp-stdio.git
 cd uno-mcp-stdio
 
 # 安装依赖

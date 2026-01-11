@@ -61,8 +61,8 @@ ignore_missing_imports = true
 uno-mcp-stdio = "uno_mcp_stdio.main:main"
 
 [project.urls]
-Homepage = "https://github.com/xray918/uno-mcp-stdio"
-Repository = "https://github.com/xray918/uno-mcp-stdio"
-Documentation = "https://github.com/xray918/uno-mcp-stdio#readme"
-Issues = "https://github.com/xray918/uno-mcp-stdio/issues"
+Homepage = "https://github.com/agentrix-ai/uno-mcp-stdio"
+Repository = "https://github.com/agentrix-ai/uno-mcp-stdio"
+Documentation = "https://github.com/agentrix-ai/uno-mcp-stdio#readme"
+Issues = "https://github.com/agentrix-ai/uno-mcp-stdio/issues"
 
