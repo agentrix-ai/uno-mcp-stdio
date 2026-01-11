@@ -4,57 +4,57 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Local stdio proxy for Uno MCP Gateway** - 为不支持 OAuth 认证的 MCP 客户端提供本地代理。
+**Local stdio proxy for Uno MCP Gateway** - Provides local proxy for MCP clients that don't support OAuth authentication.
 
-## 🎯 解决什么问题
+## 🎯 Problem Solved
 
-许多 MCP 客户端（如 Manus、Cherry Studio）不支持 OAuth 2.0 认证，无法直接连接需要认证的 MCP 服务器。
+Many MCP clients (such as Manus, Cherry Studio) don't support OAuth 2.0 authentication and cannot directly connect to MCP servers that require authentication.
 
-`uno-mcp-stdio` 作为本地代理：
-1. 使用 stdio 模式与 MCP 客户端通信（所有客户端都支持）
-2. 在本地安全存储 OAuth token
-3. 代理请求到远程 Uno Gateway，自动附加认证信息
+`uno-mcp-stdio` acts as a local proxy:
+1. Communicates with MCP clients using stdio mode (supported by all clients)
+2. Securely stores OAuth tokens locally
+3. Proxies requests to remote Uno Gateway, automatically attaching authentication information
 
 ```
 ┌─────────────────┐     stdio      ┌─────────────────┐     HTTPS      ┌─────────────────┐
 │   MCP Client    │ ◄────────────► │  uno-mcp-stdio  │ ◄────────────► │  Uno Gateway    │
-│  (不支持OAuth)   │                │   (本地代理)     │   + Bearer     │   (远程服务)     │
+│ (No OAuth)      │                │  (Local Proxy)  │   + Bearer     │  (Remote)       │
 └─────────────────┘                └─────────────────┘                └─────────────────┘
 ```
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 安装
+### Installation
 
 ```bash
-# 使用 uvx 直接运行（推荐）
+# Run directly with uvx (recommended)
 uvx uno-mcp-stdio
 
-# 或使用 pip 安装
+# Or install with pip
 pip install uno-mcp-stdio
 uno-mcp-stdio
 ```
 
-### 首次运行
+### First Run
 
-首次运行时需要 OAuth 认证：
+OAuth authentication is required on first run:
 
 ```bash
 $ uvx uno-mcp-stdio
-🔐 需要登录认证
-📋 请在浏览器中打开以下链接完成认证：
+🔐 Authentication required
+📋 Please open the following link in your browser to complete authentication:
    https://mcpmarket.cn/oauth/authorize?...
 
-⏳ 等待认证完成...
-✅ 认证成功！Token 已保存
-🚀 Uno MCP Stdio 已就绪
+⏳ Waiting for authentication...
+✅ Authentication successful! Token saved
+🚀 Uno MCP Stdio is ready
 ```
 
-### 配置 MCP 客户端
+### Configure MCP Client
 
-在 MCP 客户端中配置 stdio server：
+Configure stdio server in your MCP client:
 
-**Manus / Cherry Studio 配置示例：**
+**Manus / Cherry Studio Configuration Example:**
 
 ```json
 {
@@ -67,7 +67,7 @@ $ uvx uno-mcp-stdio
 }
 ```
 
-**如果使用 pip 安装：**
+**If installed with pip:**
 
 ```json
 {
@@ -79,19 +79,19 @@ $ uvx uno-mcp-stdio
 }
 ```
 
-## ⚙️ 配置
+## ⚙️ Configuration
 
-### 环境变量
+### Environment Variables
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `UNO_GATEWAY_URL` | Uno Gateway 地址 | `https://uno.mcpmarket.cn/mcp` |
-| `UNO_CREDENTIALS_PATH` | Token 存储路径 | `~/.uno-mcp/credentials.json` |
-| `UNO_DEBUG` | 调试模式 | `false` |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `UNO_GATEWAY_URL` | Uno Gateway URL | `https://uno.mcpmarket.cn/mcp` |
+| `UNO_CREDENTIALS_PATH` | Token storage path | `~/.uno-mcp/credentials.json` |
+| `UNO_DEBUG` | Debug mode | `false` |
 
-### Token 存储
+### Token Storage
 
-认证后的 token 存储在 `~/.uno-mcp/credentials.json`：
+Authenticated tokens are stored in `~/.uno-mcp/credentials.json`:
 
 ```json
 {
@@ -102,58 +102,58 @@ $ uvx uno-mcp-stdio
 }
 ```
 
-### 清除认证
+### Clear Authentication
 
 ```bash
-# 删除 token 文件重新认证
+# Delete token file to re-authenticate
 rm ~/.uno-mcp/credentials.json
 ```
 
-## 🔐 认证流程
+## 🔐 Authentication Flow
 
 ```
-1. 启动 uno-mcp-stdio
+1. Start uno-mcp-stdio
    │
    ▼
-2. 检查 ~/.uno-mcp/credentials.json
+2. Check ~/.uno-mcp/credentials.json
    │
-   ├─ 有效 token → 直接代理请求
+   ├─ Valid token → Proxy requests directly
    │
-   └─ 无/过期 token → 启动认证流程
+   └─ No/expired token → Start authentication flow
       │
       ▼
-3. 启动临时 HTTP 服务器 (localhost:随机端口)
+3. Start temporary HTTP server (localhost:random port)
    │
    ▼
-4. 生成 OAuth URL，显示给用户
+4. Generate OAuth URL, display to user
    │
    ▼
-5. 用户在浏览器完成授权
+5. User completes authorization in browser
    │
    ▼
-6. MCPMarket 回调到本地服务器
+6. MCPMarket callback to local server
    │
    ▼
-7. 交换 token，存储到文件
+7. Exchange token, save to file
    │
    ▼
-8. 关闭临时服务器，开始代理
+8. Close temporary server, start proxying
 ```
 
-## 🛠️ 开发
+## 🛠️ Development
 
 ```bash
-# 克隆项目
+# Clone repository
 git clone https://github.com/xray918/uno-mcp-stdio.git
 cd uno-mcp-stdio
 
-# 安装依赖
+# Install dependencies
 uv sync
 
-# 运行
+# Run
 uv run uno-mcp-stdio
 
-# 调试模式
+# Debug mode
 UNO_DEBUG=true uv run uno-mcp-stdio
 ```
 
@@ -161,3 +161,7 @@ UNO_DEBUG=true uv run uno-mcp-stdio
 
 MIT
 
+## 🌐 Languages
+
+- [English](README.md) (current)
+- [中文](README_zh.md)
