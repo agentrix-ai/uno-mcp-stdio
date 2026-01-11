@@ -161,3 +161,7 @@ UNO_DEBUG=true uv run uno-mcp-stdio
 
 MIT
 
+## 🌐 Languages
+
+- [English](README.md)
+- [中文](README_zh.md) (current)
