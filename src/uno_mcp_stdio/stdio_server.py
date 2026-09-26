@@ -27,10 +27,17 @@ from .gateway import gateway_proxy, AuthenticationRequired, GatewayError
 class UnoStdioServer:
     """Uno MCP Stdio Server"""
     
-    def __init__(self):
+    def __init__(self, link_mode: bool = False):
+        """
+        初始化 Uno MCP Stdio Server
+        
+        Args:
+            link_mode: 是否使用链接模式（用于 Manus 等远程服务器场景）
+        """
         self.server = Server("uno-mcp-stdio")
         self._authenticated = False
         self._tools_cache: Optional[list] = None
+        self._link_mode = link_mode
         self._setup_handlers()
     
     def _get_notification_options(self) -> NotificationOptions:
@@ -68,15 +75,35 @@ class UnoStdioServer:
                     tools = []
                     
                     # 始终在列表开头添加认证工具（用于首次认证、重新认证、退出登录等）
+                    # 根据是否有 pending session 和认证状态，动态调整描述
+                    has_pending = token_manager.has_pending_session()
+                    
                     if is_authenticated:
                         auth_description = "🔐 认证管理工具。当前状态：✅ 已登录。支持的操作：login(重新登录)、logout(退出登录)、status(查看状态)"
+                    elif has_pending:
+                        auth_description = "🔐 认证管理工具。当前状态：⏳ 等待输入授权码。请将认证页面显示的授权码通过 code 参数传入完成认证"
                     else:
                         auth_description = "🔐 认证管理工具。当前状态：❌ 未登录。请调用此工具完成认证后才能使用其他工具。支持的操作：login(登录)、status(查看状态)"
                     
-                    tools.append(Tool(
-                        name="uno_auth",
-                        description=auth_description,
-                        inputSchema={
+                    # Link 模式下的 inputSchema 需要支持 code 参数
+                    if self._link_mode:
+                        auth_input_schema = {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["login", "logout", "status"],
+                                    "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login"
+                                },
+                                "code": {
+                                    "type": "string",
+                                    "description": "授权码。在链接模式下，用户访问认证链接完成授权后，将页面显示的授权码填入此参数"
+                                }
+                            },
+                            "required": []
+                        }
+                    else:
+                        auth_input_schema = {
                             "type": "object",
                             "properties": {
                                 "action": {
@@ -87,6 +114,11 @@ class UnoStdioServer:
                             },
                             "required": []
                         }
+                    
+                    tools.append(Tool(
+                        name="uno_auth",
+                        description=auth_description,
+                        inputSchema=auth_input_schema
                     ))
                     
                     for t in tools_data:
@@ -105,21 +137,40 @@ class UnoStdioServer:
             except GatewayError as e:
                 self._log(f"获取工具列表失败: {e}")
                 # 如果获取失败，返回认证工具
+                if self._link_mode:
+                    fallback_schema = {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["login", "logout", "status"],
+                                "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login"
+                            },
+                            "code": {
+                                "type": "string",
+                                "description": "授权码。在链接模式下，用户访问认证链接完成授权后，将页面显示的授权码填入此参数"
+                            }
+                        },
+                        "required": []
+                    }
+                else:
+                    fallback_schema = {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["login", "logout", "status"],
+                                "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login"
+                            }
+                        },
+                        "required": []
+                    }
+                
                 return [
                     Tool(
                         name="uno_auth",
                         description="🔐 认证管理工具。请调用此工具获取认证链接。支持的操作：login(登录)、logout(退出)、status(查看状态)",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "action": {
-                                    "type": "string",
-                                    "enum": ["login", "logout", "status"],
-                                    "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login"
-                                }
-                            },
-                            "required": []
-                        }
+                        inputSchema=fallback_schema
                     )
                 ]
         
@@ -131,7 +182,8 @@ class UnoStdioServer:
             # 处理认证请求
             if name == "uno_auth":
                 action = arguments.get("action", "login")
-                return await self._handle_auth_request(action=action)
+                code = arguments.get("code")  # Link 模式下的授权码
+                return await self._handle_auth_request(action=action, code=code)
             
             # 检查认证
             try:
@@ -212,7 +264,7 @@ class UnoStdioServer:
         
         raise AuthenticationRequired("需要认证")
     
-    async def _handle_auth_request(self, action: str = "login") -> list[TextContent]:
+    async def _handle_auth_request(self, action: str = "login", code: str = None) -> list[TextContent]:
         """
         处理认证请求
         
@@ -221,12 +273,15 @@ class UnoStdioServer:
                 - login: 登录或重新登录
                 - logout: 退出登录
                 - status: 查看认证状态
+            code: 授权码（Link 模式下使用）
         """
-        self._log(f"处理认证请求: action={action}")
+        self._log(f"处理认证请求: action={action}, code={'***' if code else 'None'}, link_mode={self._link_mode}")
         
         # 处理状态查询
         if action == "status":
             token = await token_manager.get_valid_token()
+            has_pending = token_manager.has_pending_session()
+            
             if token:
                 return [TextContent(
                     type="text",
@@ -234,6 +289,15 @@ class UnoStdioServer:
                         "status": "authenticated",
                         "message": "✅ 当前已登录",
                         "hint": "可使用 action='logout' 退出登录，或 action='login' 重新登录"
+                    }, ensure_ascii=False)
+                )]
+            elif has_pending:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "status": "pending",
+                        "message": "⏳ 等待输入授权码",
+                        "hint": "请访问认证链接完成授权，然后将页面显示的授权码通过 code 参数传入"
                     }, ensure_ascii=False)
                 )]
             else:
@@ -251,6 +315,7 @@ class UnoStdioServer:
             token = await token_manager.get_valid_token()
             if token:
                 token_manager.clear_credentials()
+                token_manager.clear_pending_session()  # 同时清除 pending session
                 self._authenticated = False
                 self._log("用户已退出登录")
                 
@@ -280,6 +345,129 @@ class UnoStdioServer:
                 )]
         
         # 处理登录请求 (action == "login" 或其他)
+        
+        # Link 模式：如果提供了 code，尝试完成认证
+        if self._link_mode and code:
+            return await self._handle_link_mode_complete(code)
+        
+        # Link 模式：没有 code，生成认证链接
+        if self._link_mode:
+            return await self._handle_link_mode_start()
+        
+        # 本地模式：原有的浏览器认证流程
+        return await self._handle_local_mode_auth()
+    
+    async def _handle_link_mode_start(self) -> list[TextContent]:
+        """
+        Link 模式：生成认证链接
+        
+        返回认证 URL，用户需要在自己的设备上访问完成认证，
+        然后将页面显示的授权码传回。
+        """
+        self._log("Link 模式：生成认证链接")
+        
+        # 如果已有 token，先清除（实现重新登录）
+        existing_token = await token_manager.get_valid_token()
+        if existing_token:
+            self._log("检测到已有 token，清除后重新认证")
+            token_manager.clear_credentials()
+            self._authenticated = False
+        
+        # 清除可能存在的旧 pending session
+        token_manager.clear_pending_session()
+        
+        # 创建新的认证会话
+        session_info = await token_manager.create_link_mode_session()
+        
+        if not session_info:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "status": "failed",
+                    "error": "session_creation_failed",
+                    "message": "❌ 创建认证会话失败，请检查网络连接"
+                }, ensure_ascii=False)
+            )]
+        
+        auth_url = session_info["auth_url"]
+        self._log(f"认证链接已生成: {auth_url[:50]}...")
+        
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "link_generated",
+                "message": "🔗 请复制以下链接到浏览器完成认证",
+                "auth_url": auth_url,
+                "instructions": [
+                    "1. 复制上面的 auth_url 链接",
+                    "2. 在浏览器中打开该链接",
+                    "3. 在 MCPMarket 完成登录/授权",
+                    "4. 授权完成后，页面会显示一个授权码",
+                    "5. 将授权码复制，再次调用此工具并设置 code 参数",
+                    "   例如：uno_auth(code='你的授权码')"
+                ],
+                "next_step": "获取授权码后，调用 uno_auth(code='授权码') 完成认证"
+            }, ensure_ascii=False, indent=2)
+        )]
+    
+    async def _handle_link_mode_complete(self, code: str) -> list[TextContent]:
+        """
+        Link 模式：使用授权码完成认证
+        
+        Args:
+            code: 用户从认证页面获取的授权码
+        """
+        self._log(f"Link 模式：使用授权码完成认证")
+        
+        # 检查是否有 pending session
+        if not token_manager.has_pending_session():
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "status": "failed",
+                    "error": "no_pending_session",
+                    "message": "❌ 没有待完成的认证会话，请先调用 uno_auth() 获取认证链接"
+                }, ensure_ascii=False)
+            )]
+        
+        # 使用授权码完成认证
+        credentials = await token_manager.complete_link_mode_auth(code)
+        
+        if credentials:
+            self._authenticated = True
+            self._log("Link 模式认证成功！")
+            
+            # 发送工具列表变更通知
+            try:
+                session = self.server.request_context.session
+                await session.send_tool_list_changed()
+                self._log("已发送 tools/list_changed 通知")
+            except Exception as e:
+                self._log(f"发送通知失败（客户端可能不支持）: {e}")
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "status": "success",
+                    "message": "✅ 认证成功！现在可以使用 Uno 的工具了。"
+                }, ensure_ascii=False)
+            )]
+        else:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "status": "failed",
+                    "error": "token_exchange_failed",
+                    "message": "❌ 授权码验证失败，请检查授权码是否正确，或重新获取认证链接"
+                }, ensure_ascii=False)
+            )]
+    
+    async def _handle_local_mode_auth(self) -> list[TextContent]:
+        """
+        本地模式：使用浏览器完成认证（原有流程）
+        """
+        self._log("本地模式：启动浏览器认证流程")
+        
         # 如果已有 token，先清除（实现重新登录）
         existing_token = await token_manager.get_valid_token()
         if existing_token:
@@ -329,26 +517,8 @@ class UnoStdioServer:
         # 尝试自动打开浏览器
         browser_opened = token_manager.open_auth_url(auth_url)
         
-        # 返回认证信息
-        auth_message = {
-            "status": "authentication_required",
-            "message": "请在浏览器中完成认证",
-            "auth_url": auth_url,
-            "browser_opened": browser_opened,
-            "instructions": [
-                "1. 点击上面的链接或复制到浏览器打开",
-                "2. 在 MCPMarket 完成登录/授权",
-                "3. 授权后页面会自动关闭",
-                "4. 返回这里继续使用"
-            ]
-        }
-        
         self._log(f"认证 URL: {auth_url}")
         self._log("等待用户完成认证...")
-        
-        # 先返回认证链接
-        # 注意：这里需要异步等待回调，但 MCP 的 call_tool 是同步返回的
-        # 所以我们需要在后台等待，同时返回信息给用户
         
         # 等待回调
         callback_data = callback_server.wait_for_callback()
@@ -375,9 +545,9 @@ class UnoStdioServer:
             )]
         
         # 交换 token
-        code = callback_data.get("code")
+        auth_code = callback_data.get("code")
         credentials = await token_manager.exchange_code_for_token(
-            code=code,
+            code=auth_code,
             code_verifier=code_verifier,
             redirect_uri=redirect_uri,
             client_id=client_id
@@ -441,8 +611,13 @@ class UnoStdioServer:
         self._log("Uno MCP Stdio Server 已关闭")
 
 
-async def run_server():
-    """运行服务器入口"""
-    server = UnoStdioServer()
+async def run_server(link_mode: bool = False):
+    """
+    运行服务器入口
+    
+    Args:
+        link_mode: 是否使用链接模式（用于 Manus 等远程服务器场景）
+    """
+    server = UnoStdioServer(link_mode=link_mode)
     await server.run()
 
