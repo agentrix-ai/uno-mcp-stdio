@@ -92,6 +92,45 @@ class ClientRegistration:
         )
 
 
+@dataclass
+class PendingAuthSession:
+    """
+    待完成的认证会话（用于 Link 模式）
+    
+    Link 模式下，用户需要分两步完成认证：
+    1. 获取认证链接
+    2. 输入授权码
+    
+    这个类存储第一步生成的 PKCE 参数，供第二步使用。
+    """
+    code_verifier: str
+    code_challenge: str
+    state: str
+    redirect_uri: str
+    client_id: str
+    created_at: float  # Unix timestamp
+    
+    def is_expired(self, timeout_seconds: int = 600) -> bool:
+        """检查会话是否过期（默认 10 分钟）"""
+        return time.time() > (self.created_at + timeout_seconds)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return asdict(self)
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PendingAuthSession":
+        """从字典创建"""
+        return cls(
+            code_verifier=data["code_verifier"],
+            code_challenge=data["code_challenge"],
+            state=data["state"],
+            redirect_uri=data["redirect_uri"],
+            client_id=data["client_id"],
+            created_at=data["created_at"]
+        )
+
+
 class TokenManager:
     """Token 管理器"""
     
@@ -101,6 +140,9 @@ class TokenManager:
         self._oauth_metadata: Optional[OAuthMetadata] = None
         self._client_registration: Optional[ClientRegistration] = None
         self._client_registration_path = self._credentials_path.parent / "client.json"
+        # Link 模式相关
+        self._pending_session: Optional[PendingAuthSession] = None
+        self._pending_session_path = self._credentials_path.parent / "pending_session.json"
     
     def _log(self, message: str):
         """输出日志到 stderr（避免干扰 stdio 通信）"""
@@ -250,6 +292,64 @@ class TokenManager:
         # 注册失败，使用默认 client_id
         self._log("动态注册失败，使用默认 client_id")
         return settings.oauth_client_id
+    
+    # ==================== Pending Session Management (Link Mode) ====================
+    
+    def save_pending_session(self, session: PendingAuthSession):
+        """
+        保存待完成的认证会话（Link 模式）
+        
+        在用户获取认证链接后，保存 PKCE 参数，等待用户输入授权码。
+        """
+        self._pending_session = session
+        
+        self._pending_session_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(self._pending_session_path, "w") as f:
+            json.dump(session.to_dict(), f, indent=2)
+        
+        self._log(f"已保存 pending session: state={session.state[:8]}...")
+    
+    def load_pending_session(self) -> Optional[PendingAuthSession]:
+        """加载待完成的认证会话"""
+        if self._pending_session:
+            if not self._pending_session.is_expired():
+                return self._pending_session
+            else:
+                self._log("内存中的 pending session 已过期")
+                self._pending_session = None
+        
+        if not self._pending_session_path.exists():
+            return None
+        
+        try:
+            with open(self._pending_session_path, "r") as f:
+                data = json.load(f)
+            session = PendingAuthSession.from_dict(data)
+            
+            if session.is_expired():
+                self._log("文件中的 pending session 已过期，清除")
+                self.clear_pending_session()
+                return None
+            
+            self._pending_session = session
+            self._log(f"已加载 pending session: state={session.state[:8]}...")
+            return session
+        except Exception as e:
+            self._log(f"加载 pending session 失败: {e}")
+            return None
+    
+    def clear_pending_session(self):
+        """清除待完成的认证会话"""
+        self._pending_session = None
+        if self._pending_session_path.exists():
+            self._pending_session_path.unlink()
+            self._log("已清除 pending session")
+    
+    def has_pending_session(self) -> bool:
+        """检查是否有待完成的认证会话"""
+        session = self.load_pending_session()
+        return session is not None
     
     # ==================== Credentials Management ====================
     
@@ -466,6 +566,92 @@ class TokenManager:
         except Exception as e:
             self._log(f"无法打开浏览器: {e}")
             return False
+    
+    # ==================== Link Mode Methods ====================
+    
+    async def create_link_mode_session(self) -> Optional[Dict[str, str]]:
+        """
+        创建 Link 模式认证会话
+        
+        生成认证 URL 并保存 PKCE 参数，返回认证信息供用户使用。
+        
+        Returns:
+            {
+                "auth_url": "认证链接",
+                "state": "会话标识（可选，用于验证）"
+            }
+        """
+        # 生成 PKCE 参数
+        code_verifier, code_challenge = self.generate_pkce()
+        state = self.generate_state()
+        
+        # 使用固定的回调 URL（MCPMarket 提供的授权码显示页面）
+        redirect_uri = settings.link_mode_callback_url
+        
+        # 确保客户端已注册
+        client_id = await self.ensure_client_registered(redirect_uri)
+        if not client_id:
+            self._log("客户端注册失败")
+            return None
+        
+        # 构建认证 URL
+        auth_url = await self.build_auth_url(redirect_uri, state, code_challenge, client_id)
+        if not auth_url:
+            self._log("构建认证 URL 失败")
+            return None
+        
+        # 保存 pending session
+        session = PendingAuthSession(
+            code_verifier=code_verifier,
+            code_challenge=code_challenge,
+            state=state,
+            redirect_uri=redirect_uri,
+            client_id=client_id,
+            created_at=time.time()
+        )
+        self.save_pending_session(session)
+        
+        self._log(f"Link 模式会话已创建: auth_url={auth_url[:50]}...")
+        
+        return {
+            "auth_url": auth_url,
+            "state": state
+        }
+    
+    async def complete_link_mode_auth(self, code: str) -> Optional[Credentials]:
+        """
+        完成 Link 模式认证
+        
+        使用用户提供的授权码交换 token。
+        
+        Args:
+            code: 用户从认证页面获取的授权码
+            
+        Returns:
+            认证成功返回 Credentials，失败返回 None
+        """
+        # 加载 pending session
+        session = self.load_pending_session()
+        if not session:
+            self._log("没有待完成的认证会话")
+            return None
+        
+        # 交换 token
+        credentials = await self.exchange_code_for_token(
+            code=code,
+            code_verifier=session.code_verifier,
+            redirect_uri=session.redirect_uri,
+            client_id=session.client_id
+        )
+        
+        if credentials:
+            # 清除 pending session
+            self.clear_pending_session()
+            self._log("Link 模式认证成功")
+            return credentials
+        else:
+            self._log("Link 模式认证失败：token 交换失败")
+            return None
 
 
 # 全局实例

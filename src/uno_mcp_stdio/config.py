@@ -70,6 +70,18 @@ class Settings(BaseSettings):
         description="等待 OAuth 回调超时时间（秒）"
     )
     
+    # Link 模式配置（用于远程服务器场景，如 Manus）
+    link_mode_callback_url: str = Field(
+        default="https://mcpmarket.cn/oauth/code-display",
+        description="Link 模式下的回调 URL，该页面会显示授权码供用户复制"
+    )
+    
+    # 认证模式
+    auth_mode: str = Field(
+        default="auto",
+        description="认证模式: auto(自动检测), local(本地模式), link(链接模式)"
+    )
+    
     def get_credentials_path(self) -> Path:
         """获取 credentials 文件的完整路径"""
         path = Path(self.credentials_path).expanduser()
