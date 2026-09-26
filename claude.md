@@ -1,5 +1,7 @@
 # Uno MCP Stdio - Claude 项目指南
 
+当前版本 **0.2.1**。运行时依赖 `mcp>=1.0,<2`：mcp 2.x 去掉了 `Server.list_tools`，无上限时 `uvx` 会装到 2.x 并在启动时崩溃。仓库没有发布 workflow，合并不会自动发到 PyPI。
+
 ## 项目概述
 
 `uno-mcp-stdio` 是 Uno MCP Gateway 的本地 stdio 代理客户端。它解决了不支持 OAuth 认证的 MCP 客户端（如 Manus、Cherry Studio）无法连接需要认证的 MCP 服务器的问题。
