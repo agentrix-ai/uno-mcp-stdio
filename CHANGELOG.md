@@ -2,7 +2,8 @@
 
 ## 0.2.1
 
-- 将 `mcp` 依赖限制为 `>=1.0,<2`，修复 `uvx uno-mcp-stdio` 在 mcp 2.x 下启动即崩溃（`'Server' object has no attribute 'list_tools'`）。
+- 适配 MCP Python SDK 2.x：低层 `Server` 改为构造参数 `on_list_tools` / `on_call_tool`，返回 `ListToolsResult` / `CallToolResult`，工具列表变更通知改走 `ctx.session.send_tool_list_changed()`。
+- 依赖改为 `mcp>=2.2,<3`，避免再解析到已删除 `Server.list_tools` 的版本，也避免下一个大版本无上限装崩。
 - `__version__` 与包版本对齐为 0.2.1。
 
 ## 0.2.0

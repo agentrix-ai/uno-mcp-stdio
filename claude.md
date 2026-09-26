@@ -1,6 +1,6 @@
 # Uno MCP Stdio - Claude 项目指南
 
-当前版本 **0.2.1**。运行时依赖 `mcp>=1.0,<2`：mcp 2.x 去掉了 `Server.list_tools`，无上限时 `uvx` 会装到 2.x 并在启动时崩溃。仓库没有发布 workflow，合并不会自动发到 PyPI。
+当前版本 **0.2.1**。运行时依赖 `mcp>=2.2,<3`。低层 Server 用 `on_list_tools` / `on_call_tool`（mcp 2.x 已删除装饰器 `list_tools`）。仓库没有发布 workflow，合并不会自动发到 PyPI。
 
 ## 项目概述
 
@@ -59,19 +59,12 @@ uno-mcp-stdio/
 
 ### 1. stdio_server.py - MCP Server 实现
 
-使用 MCP Python SDK 实现 stdio 传输的 server：
-
-```python
-class UnoStdioServer:
-    # 处理 tools/list - 代理到 gateway 获取工具列表
-    # 处理 tools/call - 代理到 gateway 执行工具
-    # 处理 uno_auth_required - 启动 OAuth 认证流程
-```
+使用 MCP Python SDK 2.x 低层 `Server`（`on_list_tools` / `on_call_tool`）实现 stdio server，代理到远程 gateway。本地工具名是 `uno_auth`（登录、退出、状态；Link 模式带 `code`）。
 
 关键点：
-- 如果未认证，`tools/list` 返回一个 `uno_auth_required` 工具
-- 用户调用该工具触发 OAuth 认证流程
-- 认证成功后，重新调用 `tools/list` 获取真实工具列表
+- `tools/list` 始终在列表开头放 `uno_auth`，其余工具来自 gateway
+- 未登录时 `tools/call` 除 `uno_auth` 外返回需要认证
+- 认证成功后通过 `ctx.session.send_tool_list_changed()` 通知客户端刷新
 
 ### 2. token_manager.py - Token 管理
 

@@ -10,14 +10,18 @@ import json
 import asyncio
 from typing import Optional
 
-from mcp.server import Server, NotificationOptions
+from mcp.server import Server, NotificationOptions, ServerRequestContext
 from mcp.server.stdio import stdio_server
 from mcp.types import (
-    Tool,
-    TextContent,
+    CallToolRequestParams,
     CallToolResult,
     ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
 )
+
+from . import __version__
 
 from .config import settings
 from .auth import token_manager, CallbackServer
@@ -34,11 +38,16 @@ class UnoStdioServer:
         Args:
             link_mode: 是否使用链接模式（用于 Manus 等远程服务器场景）
         """
-        self.server = Server("uno-mcp-stdio")
         self._authenticated = False
         self._tools_cache: Optional[list] = None
         self._link_mode = link_mode
-        self._setup_handlers()
+        # mcp 2.x：处理器在构造时注册，不再有 list_tools/call_tool 装饰器。
+        self.server = Server(
+            "uno-mcp-stdio",
+            version=__version__,
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+        )
     
     def _get_notification_options(self) -> NotificationOptions:
         """获取通知选项，声明支持 tools_changed 通知"""
@@ -52,204 +61,189 @@ class UnoStdioServer:
         """输出日志到 stderr（避免干扰 stdio 通信）"""
         print(f"[UnoStdio] {message}", file=sys.stderr, flush=True)
     
-    def _setup_handlers(self):
-        """设置 MCP 请求处理器"""
-        
-        @self.server.list_tools()
-        async def handle_list_tools() -> list[Tool]:
-            """处理 tools/list 请求"""
-            self._log("收到 tools/list 请求")
-            
-            # 检查是否已认证
-            is_authenticated = self._authenticated or bool(await token_manager.get_valid_token())
-            
-            # 获取工具列表（proxy 内部会自动处理 default token）
-            try:
-                response = await gateway_proxy.list_tools()
-                
-                if "result" in response and "tools" in response["result"]:
-                    tools_data = response["result"]["tools"]
-                    self._tools_cache = tools_data
-                    
-                    # 转换为 MCP Tool 对象
-                    tools = []
-                    
-                    # 始终在列表开头添加认证工具（用于首次认证、重新认证、退出登录等）
-                    # 根据是否有 pending session 和认证状态，动态调整描述
-                    has_pending = token_manager.has_pending_session()
-                    
-                    if is_authenticated:
-                        auth_description = "🔐 认证管理工具。当前状态：✅ 已登录。支持的操作：login(重新登录)、logout(退出登录)、status(查看状态)"
-                    elif has_pending:
-                        auth_description = "🔐 认证管理工具。当前状态：⏳ 等待输入授权码。请将认证页面显示的授权码通过 code 参数传入完成认证"
-                    else:
-                        auth_description = "🔐 认证管理工具。当前状态：❌ 未登录。请调用此工具完成认证后才能使用其他工具。支持的操作：login(登录)、status(查看状态)"
-                    
-                    # Link 模式下的 inputSchema 需要支持 code 参数
-                    if self._link_mode:
-                        auth_input_schema = {
-                            "type": "object",
-                            "properties": {
-                                "action": {
-                                    "type": "string",
-                                    "enum": ["login", "logout", "status"],
-                                    "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login"
-                                },
-                                "code": {
-                                    "type": "string",
-                                    "description": "授权码。在链接模式下，用户访问认证链接完成授权后，将页面显示的授权码填入此参数"
-                                }
-                            },
-                            "required": []
-                        }
-                    else:
-                        auth_input_schema = {
-                            "type": "object",
-                            "properties": {
-                                "action": {
-                                    "type": "string",
-                                    "enum": ["login", "logout", "status"],
-                                    "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login"
-                                }
-                            },
-                            "required": []
-                        }
-                    
+    def _auth_input_schema(self) -> dict:
+        """uno_auth 的入参。Link 模式多一个 code。"""
+        properties: dict = {
+            "action": {
+                "type": "string",
+                "enum": ["login", "logout", "status"],
+                "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login",
+            }
+        }
+        if self._link_mode:
+            properties["code"] = {
+                "type": "string",
+                "description": "授权码。在链接模式下，用户访问认证链接完成授权后，将页面显示的授权码填入此参数",
+            }
+        return {"type": "object", "properties": properties, "required": []}
+
+    @staticmethod
+    def _tool_schema(raw: object) -> dict:
+        """协议要求 input_schema 根上有 type=object。"""
+        if not isinstance(raw, dict):
+            return {"type": "object"}
+        if "type" not in raw:
+            return {"type": "object", **raw}
+        return raw
+
+    async def _notify_tools_changed(self, session) -> None:
+        """认证状态变化后通知客户端刷新工具列表。"""
+        if session is None:
+            return
+        try:
+            await session.send_tool_list_changed()
+            self._log("已发送 tools/list_changed 通知")
+        except Exception as e:
+            self._log(f"发送通知失败（客户端可能不支持）: {e}")
+
+    async def _on_list_tools(
+        self,
+        ctx: ServerRequestContext,
+        params: PaginatedRequestParams | None,
+    ) -> ListToolsResult:
+        """处理 tools/list。返回完整 ListToolsResult，不再依赖 SDK 自动包装。"""
+        del ctx, params
+        self._log("收到 tools/list 请求")
+
+        is_authenticated = self._authenticated or bool(await token_manager.get_valid_token())
+
+        try:
+            response = await gateway_proxy.list_tools()
+
+            if "result" in response and "tools" in response["result"]:
+                tools_data = response["result"]["tools"]
+                self._tools_cache = tools_data
+                tools = []
+                has_pending = token_manager.has_pending_session()
+
+                if is_authenticated:
+                    auth_description = "🔐 认证管理工具。当前状态：✅ 已登录。支持的操作：login(重新登录)、logout(退出登录)、status(查看状态)"
+                elif has_pending:
+                    auth_description = "🔐 认证管理工具。当前状态：⏳ 等待输入授权码。请将认证页面显示的授权码通过 code 参数传入完成认证"
+                else:
+                    auth_description = "🔐 认证管理工具。当前状态：❌ 未登录。请调用此工具完成认证后才能使用其他工具。支持的操作：login(登录)、status(查看状态)"
+
+                tools.append(Tool(
+                    name="uno_auth",
+                    description=auth_description,
+                    input_schema=self._auth_input_schema(),
+                ))
+
+                for t in tools_data:
                     tools.append(Tool(
-                        name="uno_auth",
-                        description=auth_description,
-                        inputSchema=auth_input_schema
+                        name=t["name"],
+                        description=t.get("description", ""),
+                        input_schema=self._tool_schema(
+                            t.get("inputSchema", t.get("input_schema"))
+                        ),
                     ))
-                    
-                    for t in tools_data:
-                        tools.append(Tool(
-                            name=t["name"],
-                            description=t.get("description", ""),
-                            inputSchema=t.get("inputSchema", {"type": "object"})
-                        ))
-                    
-                    self._log(f"返回 {len(tools)} 个工具 (已认证: {is_authenticated})")
-                    return tools
-                else:
-                    self._log(f"Gateway 返回格式异常: {response}")
-                    return []
-                    
-            except GatewayError as e:
-                self._log(f"获取工具列表失败: {e}")
-                # 如果获取失败，返回认证工具
-                if self._link_mode:
-                    fallback_schema = {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": ["login", "logout", "status"],
-                                "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login"
-                            },
-                            "code": {
-                                "type": "string",
-                                "description": "授权码。在链接模式下，用户访问认证链接完成授权后，将页面显示的授权码填入此参数"
-                            }
-                        },
-                        "required": []
-                    }
-                else:
-                    fallback_schema = {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": ["login", "logout", "status"],
-                                "description": "操作类型：login(登录/重新登录)、logout(退出登录)、status(查看状态)。默认为 login"
-                            }
-                        },
-                        "required": []
-                    }
-                
-                return [
-                    Tool(
-                        name="uno_auth",
-                        description="🔐 认证管理工具。请调用此工具获取认证链接。支持的操作：login(登录)、logout(退出)、status(查看状态)",
-                        inputSchema=fallback_schema
-                    )
-                ]
-        
-        @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
-            """处理 tools/call 请求"""
-            self._log(f"收到 tools/call 请求: {name}")
-            
-            # 处理认证请求
-            if name == "uno_auth":
-                action = arguments.get("action", "login")
-                code = arguments.get("code")  # Link 模式下的授权码
-                return await self._handle_auth_request(action=action, code=code)
-            
-            # 检查认证
-            try:
-                await self._ensure_authenticated()
-            except AuthenticationRequired:
-                return [TextContent(
+
+                self._log(f"返回 {len(tools)} 个工具 (已认证: {is_authenticated})")
+                return ListToolsResult(tools=tools)
+
+            self._log(f"Gateway 返回格式异常: {response}")
+            return ListToolsResult(tools=[])
+
+        except GatewayError as e:
+            self._log(f"获取工具列表失败: {e}")
+            return ListToolsResult(tools=[
+                Tool(
+                    name="uno_auth",
+                    description="🔐 认证管理工具。请调用此工具获取认证链接。支持的操作：login(登录)、logout(退出)、status(查看状态)",
+                    input_schema=self._auth_input_schema(),
+                )
+            ])
+
+    async def _on_call_tool(
+        self,
+        ctx: ServerRequestContext,
+        params: CallToolRequestParams,
+    ) -> CallToolResult:
+        """处理 tools/call。异常转成 is_error 结果，避免变成 JSON-RPC 协议错误。"""
+        try:
+            return await self._dispatch_call(ctx, params)
+        except Exception as e:
+            self._log(f"tools/call 未处理异常: {e}")
+            return CallToolResult(
+                content=[TextContent(
                     type="text",
                     text=json.dumps({
-                        "error": "authentication_required",
-                        "message": "需要认证，请先调用 uno_auth 工具"
-                    }, ensure_ascii=False)
-                )]
-            
-            # 代理到 gateway
-            try:
-                response = await gateway_proxy.call_tool(name, arguments, request_id=1)
-                
-                if "result" in response:
-                    result = response["result"]
-                    # 返回工具调用结果
-                    if "content" in result:
-                        contents = []
-                        for item in result["content"]:
-                            if item.get("type") == "text":
-                                contents.append(TextContent(
-                                    type="text",
-                                    text=item.get("text", "")
-                                ))
-                        return contents
-                    else:
-                        return [TextContent(
-                            type="text",
-                            text=json.dumps(result, ensure_ascii=False, indent=2)
-                        )]
-                elif "error" in response:
-                    return [TextContent(
-                        type="text",
-                        text=json.dumps({
-                            "error": response["error"].get("code"),
-                            "message": response["error"].get("message")
-                        }, ensure_ascii=False)
-                    )]
-                else:
-                    return [TextContent(
-                        type="text",
-                        text=json.dumps(response, ensure_ascii=False)
-                    )]
-                    
-            except AuthenticationRequired:
-                token_manager.clear_credentials()
-                self._authenticated = False
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": "authentication_expired",
-                        "message": "认证已过期，请重新调用 uno_auth 工具"
-                    }, ensure_ascii=False)
-                )]
-            except GatewayError as e:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": "gateway_error",
-                        "message": str(e)
-                    }, ensure_ascii=False)
-                )]
+                        "error": "internal_error",
+                        "message": str(e),
+                    }, ensure_ascii=False),
+                )],
+                is_error=True,
+            )
+
+    async def _dispatch_call(
+        self,
+        ctx: ServerRequestContext,
+        params: CallToolRequestParams,
+    ) -> CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
+        self._log(f"收到 tools/call 请求: {name}")
+
+        if name == "uno_auth":
+            action = arguments.get("action", "login")
+            code = arguments.get("code")
+            contents = await self._handle_auth_request(
+                action=action, code=code, session=ctx.session
+            )
+            return CallToolResult(content=contents, is_error=False)
+
+        try:
+            await self._ensure_authenticated()
+        except AuthenticationRequired:
+            return self._text_result({
+                "error": "authentication_required",
+                "message": "需要认证，请先调用 uno_auth 工具",
+            })
+
+        try:
+            response = await gateway_proxy.call_tool(name, arguments, request_id=1)
+
+            if "result" in response:
+                result = response["result"]
+                if "content" in result:
+                    contents = []
+                    for item in result["content"]:
+                        if item.get("type") == "text":
+                            contents.append(TextContent(
+                                type="text",
+                                text=item.get("text", ""),
+                            ))
+                    return CallToolResult(content=contents, is_error=False)
+                return self._text_result(result, indent=2)
+            if "error" in response:
+                return self._text_result({
+                    "error": response["error"].get("code"),
+                    "message": response["error"].get("message"),
+                })
+            return self._text_result(response)
+
+        except AuthenticationRequired:
+            token_manager.clear_credentials()
+            self._authenticated = False
+            return self._text_result({
+                "error": "authentication_expired",
+                "message": "认证已过期，请重新调用 uno_auth 工具",
+            })
+        except GatewayError as e:
+            return self._text_result({
+                "error": "gateway_error",
+                "message": str(e),
+            })
+
+    @staticmethod
+    def _text_result(payload: object, indent: int | None = None) -> CallToolResult:
+        return CallToolResult(
+            content=[TextContent(
+                type="text",
+                text=json.dumps(payload, ensure_ascii=False, indent=indent),
+            )],
+            is_error=False,
+        )
     
     async def _ensure_authenticated(self):
         """确保已认证"""
@@ -264,7 +258,12 @@ class UnoStdioServer:
         
         raise AuthenticationRequired("需要认证")
     
-    async def _handle_auth_request(self, action: str = "login", code: str = None) -> list[TextContent]:
+    async def _handle_auth_request(
+        self,
+        action: str = "login",
+        code: str = None,
+        session=None,
+    ) -> list[TextContent]:
         """
         处理认证请求
         
@@ -319,14 +318,8 @@ class UnoStdioServer:
                 self._authenticated = False
                 self._log("用户已退出登录")
                 
-                # 发送工具列表变更通知
-                try:
-                    session = self.server.request_context.session
-                    await session.send_tool_list_changed()
-                    self._log("已发送 tools/list_changed 通知")
-                except Exception as e:
-                    self._log(f"发送通知失败（客户端可能不支持）: {e}")
-                
+                await self._notify_tools_changed(session)
+
                 return [TextContent(
                     type="text",
                     text=json.dumps({
@@ -348,14 +341,14 @@ class UnoStdioServer:
         
         # Link 模式：如果提供了 code，尝试完成认证
         if self._link_mode and code:
-            return await self._handle_link_mode_complete(code)
+            return await self._handle_link_mode_complete(code, session=session)
         
         # Link 模式：没有 code，生成认证链接
         if self._link_mode:
             return await self._handle_link_mode_start()
         
         # 本地模式：原有的浏览器认证流程
-        return await self._handle_local_mode_auth()
+        return await self._handle_local_mode_auth(session=session)
     
     async def _handle_link_mode_start(self) -> list[TextContent]:
         """
@@ -410,7 +403,7 @@ class UnoStdioServer:
             }, ensure_ascii=False, indent=2)
         )]
     
-    async def _handle_link_mode_complete(self, code: str) -> list[TextContent]:
+    async def _handle_link_mode_complete(self, code: str, session=None) -> list[TextContent]:
         """
         Link 模式：使用授权码完成认证
         
@@ -437,14 +430,8 @@ class UnoStdioServer:
             self._authenticated = True
             self._log("Link 模式认证成功！")
             
-            # 发送工具列表变更通知
-            try:
-                session = self.server.request_context.session
-                await session.send_tool_list_changed()
-                self._log("已发送 tools/list_changed 通知")
-            except Exception as e:
-                self._log(f"发送通知失败（客户端可能不支持）: {e}")
-            
+            await self._notify_tools_changed(session)
+
             return [TextContent(
                 type="text",
                 text=json.dumps({
@@ -462,7 +449,7 @@ class UnoStdioServer:
                 }, ensure_ascii=False)
             )]
     
-    async def _handle_local_mode_auth(self) -> list[TextContent]:
+    async def _handle_local_mode_auth(self, session=None) -> list[TextContent]:
         """
         本地模式：使用浏览器完成认证（原有流程）
         """
@@ -557,14 +544,8 @@ class UnoStdioServer:
             self._authenticated = True
             self._log("认证成功！")
             
-            # 发送工具列表变更通知，让客户端刷新工具列表
-            try:
-                session = self.server.request_context.session
-                await session.send_tool_list_changed()
-                self._log("已发送 tools/list_changed 通知")
-            except Exception as e:
-                self._log(f"发送通知失败（客户端可能不支持）: {e}")
-            
+            await self._notify_tools_changed(session)
+
             return [TextContent(
                 type="text",
                 text=json.dumps({
