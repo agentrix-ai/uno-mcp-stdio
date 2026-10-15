@@ -8,16 +8,6 @@
     "url": "https://github.com/agentrix-ai/uno-mcp-stdio",
     "source": "github"
   },
-  "packages": [
-    {
-      "registryType": "pypi",
-      "identifier": "uno-mcp-stdio",
-      "version": "0.2.1",
-      "transport": {
-        "type": "stdio"
-      }
-    }
-  ],
   "remotes": [
     {
       "type": "streamable-http",
