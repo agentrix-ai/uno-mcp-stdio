@@ -165,3 +165,5 @@ MIT
 
 - [English](README.md) (current)
 - [中文](README_zh.md)
+
+<!-- mcp-name: io.github.agentrix-ai/uno -->
